@@ -1,9 +1,9 @@
 {
   "name": "rewriter",
   "displayName": "rewriter",
-  "publisher": "dtinth",
-  "description": "Use Google's Gemini Pro model to rewrite a passage of text",
-  "version": "0.1.0",
+  "publisher": "andrwj",
+  "description": "Use Google's Gemini model to rewrite a passage of text",
+  "version": "0.2.0",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -11,12 +11,17 @@
     "Other"
   ],
   "activationEvents": [],
+  "main": "./out/extension.js",
   "browser": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "rewriter.setApiKey",
         "title": "Rewriter: Set API key"
+      },
+      {
+        "command": "rewriter.selectModel",
+        "title": "Rewriter: Select Gemini Model"
       },
       {
         "command": "rewriter.rewrite",
@@ -26,6 +31,12 @@
     "configuration": {
       "title": "Rewriter",
       "properties": {
+        "rewriter.model": {
+          "type": "string",
+          "default": "gemini-2.0-flash",
+          "description": "The Gemini model to use for rewriting.",
+          "scope": "window"
+        },
         "rewriter.prompt": {
           "type": "string",
           "default": "Please rewrite the text to improve its grammar and readability",
@@ -48,7 +59,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/dtinth/rewriter.git"
+    "url": "https://github.com/andrwj/rewriter.git"
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -56,7 +67,8 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "repackage": "vsce package"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.6",
@@ -66,9 +78,12 @@
     "@typescript-eslint/parser": "^6.15.0",
     "@vscode/test-cli": "^0.0.4",
     "@vscode/test-electron": "^2.3.8",
-    "@vscode/vsce": "^2.22.0",
+    "@vscode/vsce": "^3.7.1",
     "eslint": "^8.56.0",
     "typescript": "^5.3.3"
   },
-  "packageManager": "npm@10.4.0+sha256.0e4e5986526a578a6cdc5647cf862efba03dfcb063672f90bc525433b893fba9"
+  "packageManager": "npm@10.4.0+sha256.0e4e5986526a578a6cdc5647cf862efba03dfcb063672f90bc525433b893fba9",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1"
+  }
 }

@@ -1,20 +1,9 @@
 import * as vscode from "vscode";
-
-interface Example {
-  input: string;
-  output: string;
-}
-
-type ExampleConfig = Example[] | Record<string, string>;
-
-function toExamples(examples: ExampleConfig): Example[] {
-  if (Array.isArray(examples)) {
-    return examples;
-  }
-  return Object.entries(examples).map(([input, output]) => ({ input, output }));
-}
+import { getRewriterConfig, generateRewrite, replaceSelection, listAvailableModels, updateModelConfig } from "./binding";
+import { RewriteContext } from "./phase";
 
 export function activate(context: vscode.ExtensionContext) {
+  // [Flow] Set API Key Command
   context.subscriptions.push(
     vscode.commands.registerCommand("rewriter.setApiKey", async () => {
       const apiKey = await vscode.window.showInputBox({
@@ -27,116 +16,125 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       await context.secrets.store("rewriter.apiKey", apiKey);
+      vscode.window.showInformationMessage("API Key saved successfully.");
     })
   );
+
+  // [Flow] Select Model Command
+  context.subscriptions.push(
+    vscode.commands.registerCommand("rewriter.selectModel", async () => {
+      try {
+        const apiKey = await context.secrets.get("rewriter.apiKey");
+        if (!apiKey) {
+          vscode.window.showErrorMessage(
+            "Please set the API key first by running 'Rewriter: Set API Key'"
+          );
+          return;
+        }
+
+        const selectedModel = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: "Fetching available Gemini models...",
+            cancellable: false
+          },
+          async () => {
+            const models = await listAvailableModels(apiKey);
+            if (models.length === 0) {
+              throw new Error("No available models found for generateContent.");
+            }
+
+            return await vscode.window.showQuickPick(models, {
+              placeHolder: "Select a Gemini model to use",
+              title: "Select Gemini Model"
+            });
+          }
+        );
+
+        if (selectedModel) {
+          await updateModelConfig(selectedModel);
+          vscode.window.showInformationMessage(`Rewriter model set to: ${selectedModel}`);
+        }
+      } catch (error) {
+        console.error("Select Model Error:", error);
+        vscode.window.showErrorMessage(`Failed to list models: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
+    })
+  );
+
+  // [Flow] Rewrite Command
   context.subscriptions.push(
     vscode.commands.registerCommand("rewriter.rewrite", async (args) => {
-      const task = vscode.window.withProgress(
+  // [Topology] Immediate Context Capture
+  // Capture the editor state *synchronously* at the moment of command invocation.
+  // This prevents 'State Drift' where the active editor/selection changes during async operations.
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showErrorMessage("No active editor found");
+        return;
+      }
+      const text = editor.document.getText(editor.selection);
+      if (!text) {
+        vscode.window.showErrorMessage("No text selected");
+        return;
+      }
+
+      await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
           title: "Rewriting...",
           cancellable: false,
         },
-        async (progress) => {
-          const apiKey = await context.secrets.get("rewriter.apiKey");
-          if (!apiKey) {
-            vscode.window.showErrorMessage(
-              "Please set the API key first by running the command Rewriter: Set API Key"
-            );
-            return;
-          }
+        async () => {
+          try {
+            // 1. Acquire Phase (Configuration)
+            const apiKey = await context.secrets.get("rewriter.apiKey");
+            if (!apiKey) {
+              vscode.window.showErrorMessage(
+                "Please set the API key first by running the command 'Rewriter: Set API Key'"
+              );
+              return;
+            }
+            const config = getRewriterConfig(apiKey);
 
-          const editor = vscode.window.activeTextEditor;
-          if (!editor) {
-            vscode.window.showErrorMessage("No active editor found");
-            return;
-          }
+            // [Phase] Validation
+            // Explicitly check for invalid/deprecated default state.
+            // If the user hasn't selected a model (or persistence failed and we reverted to default),
+            // and that default is the broken 'gemini-pro', we MUST interrupt the flow.
+            if (config.modelName === "gemini-pro") {
+              const selection = await vscode.window.showWarningMessage(
+                "The default model 'gemini-pro' is deprecated. Please select a valid Gemini model to proceed.",
+                "Select Model"
+              );
+              if (selection === "Select Model") {
+                vscode.commands.executeCommand("rewriter.selectModel");
+              }
+              return; // Halt execution regardless of selection (user needs to pick one first)
+            }
+            const rewriteContext: RewriteContext = {
+              text,
+              selectionPrompt: args?.prompt
+            };
 
-          const selection = editor.selection;
-          const text = editor.document.getText(selection);
-          if (!text) {
-            vscode.window.showErrorMessage("No text selected");
-            return;
-          }
+            // 3. Execute Binding (Generative AI)
+            const result = await generateRewrite(config, rewriteContext);
 
-          const parts: { text: string }[] = [];
+            // 4. Execute Binding (Editor Update)
+            // Use the captured 'editor' reference to ensure we write back to the correct document.
+            await replaceSelection(editor, result);
 
-          const configuration = vscode.workspace.getConfiguration("rewriter");
-
-          parts.push({
-            text: args?.prompt || configuration.get<string>("prompt") || "",
-          });
-
-          const examples: Example[] = toExamples(
-            args?.examples || configuration.get<ExampleConfig>("examples", [])
-          );
-          if (Array.isArray(examples)) {
-            for (const example of examples) {
-              parts.push({ text: `input: ${example?.input}` });
-              parts.push({ text: `output: ${example?.output}` });
+          } catch (error) {
+            console.error("Rewrite Error:", error);
+            if (error instanceof Error) {
+              vscode.window.showErrorMessage(`Rewrite failed: ${error.message}`);
+            } else {
+              vscode.window.showErrorMessage("Rewrite failed with an unknown error.");
             }
           }
-          parts.push({ text: `input: ${text}` });
-          parts.push({ text: `output: ` });
-
-          const request = {
-            contents: [{ parts }],
-            generationConfig: {
-              temperature: 0.9,
-              topK: 1,
-              topP: 1,
-              maxOutputTokens: 2048,
-              stopSequences: [],
-            },
-            safetySettings: [
-              {
-                category: "HARM_CATEGORY_HARASSMENT",
-                threshold: "BLOCK_NONE",
-              },
-              {
-                category: "HARM_CATEGORY_HATE_SPEECH",
-                threshold: "BLOCK_NONE",
-              },
-              {
-                category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                threshold: "BLOCK_NONE",
-              },
-              {
-                category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-                threshold: "BLOCK_NONE",
-              },
-            ],
-          };
-          if (args?.debug) {
-            console.log("Request to Gemini", request);
-          }
-
-          const response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?${new URLSearchParams(
-              { key: apiKey }
-            )}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(request),
-            }
-          );
-          const data = await response.json();
-          if (args?.debug) {
-            console.log("Response from Gemini", data);
-          }
-
-          const output = (data as any).candidates[0].content.parts
-            .map((part: { text: string }) => part.text)
-            .join("");
-          await editor.edit((editBuilder) => {
-            editBuilder.replace(selection, output);
-          });
         }
       );
     })
   );
 }
 
-// This method is called when your extension is deactivated
 export function deactivate() {}
